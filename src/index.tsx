@@ -20,12 +20,14 @@ type SshProfile = {
   ipAddress: string;
   port?: number;
   color?: string;
+  notes?: string;
   isFavorite?: boolean;
 };
 
 type ProfileFormValues = Pick<SshProfile, "name" | "username" | "ipAddress"> & {
   port: string;
   color: string;
+  notes: string;
 };
 
 const STORAGE_KEY = "ssh-profiles";
@@ -111,6 +113,7 @@ function ProfileForm({
       ipAddress,
       port,
       color: values.color,
+      notes: values.notes.trim(),
       isFavorite: profile?.isFavorite ?? false,
     };
     const profiles = await readProfiles();
@@ -189,6 +192,12 @@ function ProfileForm({
           />
         ))}
       </Form.Dropdown>
+      <Form.TextArea
+        id="notes"
+        title="Notes"
+        placeholder="Optional details about this server"
+        defaultValue={profile?.notes ?? ""}
+      />
     </Form>
   );
 }
@@ -291,6 +300,7 @@ export default function Command() {
             }}
             title={profile.name}
             subtitle={`${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
+            keywords={profile.notes ? [profile.notes] : undefined}
             accessories={profile.isFavorite ? [{ icon: Icon.Star }] : undefined}
             actions={
               <ActionPanel>

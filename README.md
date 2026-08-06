@@ -6,6 +6,7 @@ A Raycast extension for saving SSH connection profiles and quickly opening them 
 
 - Save a friendly name, username, IPv4 address, and port for each SSH profile
 - Assign a colour to each profile for quick visual identification
+- Add searchable notes about a server's purpose or environment
 - Search saved profiles from Raycast
 - Mark profiles as favourites and keep them at the top of the list
 - Press <kbd>Enter</kbd> to connect to the selected profile
