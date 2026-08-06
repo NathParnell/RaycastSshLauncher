@@ -18,9 +18,10 @@ type SshProfile = {
   name: string;
   username: string;
   ipAddress: string;
+  isFavorite?: boolean;
 };
 
-type ProfileFormValues = Omit<SshProfile, "id">;
+type ProfileFormValues = Pick<SshProfile, "name" | "username" | "ipAddress">;
 
 const STORAGE_KEY = "ssh-profiles";
 
@@ -76,6 +77,7 @@ function ProfileForm({
       name,
       username,
       ipAddress,
+      isFavorite: profile?.isFavorite ?? false,
     };
     const profiles = await readProfiles();
     const updatedProfiles = profile
@@ -179,6 +181,25 @@ export default function Command() {
     });
   }
 
+  async function toggleFavorite(profile: SshProfile) {
+    const updatedProfile = {
+      ...profile,
+      isFavorite: !profile.isFavorite,
+    };
+    const updatedProfiles = profiles.map((currentProfile) =>
+      currentProfile.id === profile.id ? updatedProfile : currentProfile,
+    );
+    await LocalStorage.setItem(STORAGE_KEY, JSON.stringify(updatedProfiles));
+    setProfiles(updatedProfiles);
+    await showToast({
+      style: Toast.Style.Success,
+      title: updatedProfile.isFavorite
+        ? "Added to favourites"
+        : "Removed from favourites",
+      message: profile.name,
+    });
+  }
+
   const addProfileAction = (
     <Action.Push
       title="Add SSH Profile"
@@ -198,37 +219,53 @@ export default function Command() {
         />
       ) : null}
 
-      {profiles.map((profile) => (
-        <List.Item
-          key={profile.id}
-          icon={Icon.Terminal}
-          title={profile.name}
-          subtitle={`${profile.username}@${profile.ipAddress}`}
-          actions={
-            <ActionPanel>
-              <Action.Open
-                title="Connect via SSH"
-                icon={Icon.Terminal}
-                target={`ssh://${profile.username}@${profile.ipAddress}`}
-              />
-              <Action.Push
-                title="Edit SSH Profile"
-                icon={Icon.Pencil}
-                target={
-                  <ProfileForm profile={profile} onSave={updateProfile} />
-                }
-              />
-              {addProfileAction}
-              <Action
-                title="Delete SSH Profile"
-                icon={Icon.Trash}
-                style={Action.Style.Destructive}
-                onAction={() => deleteProfile(profile)}
-              />
-            </ActionPanel>
-          }
-        />
-      ))}
+      {[...profiles]
+        .sort(
+          (firstProfile, secondProfile) =>
+            Number(Boolean(secondProfile.isFavorite)) -
+            Number(Boolean(firstProfile.isFavorite)),
+        )
+        .map((profile) => (
+          <List.Item
+            key={profile.id}
+            icon={Icon.Terminal}
+            title={profile.name}
+            subtitle={`${profile.username}@${profile.ipAddress}`}
+            accessories={profile.isFavorite ? [{ icon: Icon.Star }] : undefined}
+            actions={
+              <ActionPanel>
+                <Action.Open
+                  title="Connect via SSH"
+                  icon={Icon.Terminal}
+                  target={`ssh://${profile.username}@${profile.ipAddress}`}
+                />
+                <Action
+                  title={
+                    profile.isFavorite
+                      ? "Remove from Favourites"
+                      : "Add to Favourites"
+                  }
+                  icon={Icon.Star}
+                  onAction={() => toggleFavorite(profile)}
+                />
+                <Action.Push
+                  title="Edit SSH Profile"
+                  icon={Icon.Pencil}
+                  target={
+                    <ProfileForm profile={profile} onSave={updateProfile} />
+                  }
+                />
+                {addProfileAction}
+                <Action
+                  title="Delete SSH Profile"
+                  icon={Icon.Trash}
+                  style={Action.Style.Destructive}
+                  onAction={() => deleteProfile(profile)}
+                />
+              </ActionPanel>
+            }
+          />
+        ))}
     </List>
   );
 }
