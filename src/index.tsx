@@ -206,6 +206,11 @@ export default function Command() {
           subtitle={`${profile.username}@${profile.ipAddress}`}
           actions={
             <ActionPanel>
+              <Action.Open
+                title="Connect via SSH"
+                icon={Icon.Terminal}
+                target={`ssh://${profile.username}@${profile.ipAddress}`}
+              />
               <Action.Push
                 title="Edit SSH Profile"
                 icon={Icon.Pencil}
