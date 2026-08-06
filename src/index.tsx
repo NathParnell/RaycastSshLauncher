@@ -2,6 +2,7 @@ import {
   Action,
   ActionPanel,
   Alert,
+  Detail,
   Form,
   Icon,
   List,
@@ -63,6 +64,10 @@ async function readProfiles(): Promise<SshProfile[]> {
   } catch {
     return [];
   }
+}
+
+function escapeMarkdown(value: string): string {
+  return value.replace(/([\\`*_{}[\]()<>#+\-.!|])/g, "\\$1");
 }
 
 function ProfileForm({
@@ -202,6 +207,70 @@ function ProfileForm({
   );
 }
 
+function ProfileDetails({
+  profile,
+  onUpdate,
+}: {
+  profile: SshProfile;
+  onUpdate: (profile: SshProfile) => void;
+}) {
+  const notes = profile.notes
+    ? escapeMarkdown(profile.notes)
+    : "_No notes added to this profile._";
+
+  return (
+    <Detail
+      navigationTitle={profile.name}
+      markdown={`# ${escapeMarkdown(profile.name)}\n\n${notes}`}
+      metadata={
+        <Detail.Metadata>
+          <Detail.Metadata.Label
+            title="Connection"
+            text={`${profile.username}@${profile.ipAddress}`}
+          />
+          <Detail.Metadata.Label title="Username" text={profile.username} />
+          <Detail.Metadata.Label title="IP Address" text={profile.ipAddress} />
+          <Detail.Metadata.Label
+            title="Port"
+            text={String(profile.port ?? 22)}
+          />
+          <Detail.Metadata.Separator />
+          <Detail.Metadata.Label
+            title="Favourite"
+            text={profile.isFavorite ? "Yes" : "No"}
+            icon={profile.isFavorite ? Icon.Star : undefined}
+          />
+          <Detail.Metadata.Label
+            title="Colour"
+            text={
+              PROFILE_COLORS.find((color) => color.value === profile.color)
+                ?.name ?? "Blue"
+            }
+            icon={{
+              source: Icon.Circle,
+              tintColor: profile.color ?? DEFAULT_PROFILE_COLOR,
+            }}
+          />
+        </Detail.Metadata>
+      }
+      actions={
+        <ActionPanel>
+          <Action.Open
+            title="Connect via SSH"
+            icon={Icon.Terminal}
+            target={`ssh://${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
+          />
+          <Action.Push
+            title="Edit SSH Profile"
+            icon={Icon.Pencil}
+            target={<ProfileForm profile={profile} onSave={onUpdate} />}
+          />
+        </ActionPanel>
+      }
+    />
+  );
+}
+
 export default function Command() {
   const [profiles, setProfiles] = useState<SshProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -308,6 +377,16 @@ export default function Command() {
                   title="Connect via SSH"
                   icon={Icon.Terminal}
                   target={`ssh://${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
+                />
+                <Action.Push
+                  title="View Profile Details"
+                  icon={Icon.Eye}
+                  target={
+                    <ProfileDetails
+                      profile={profile}
+                      onUpdate={updateProfile}
+                    />
+                  }
                 />
                 <Action
                   title={
