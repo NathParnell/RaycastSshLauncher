@@ -335,6 +335,23 @@ export default function Command() {
     });
   }
 
+  async function duplicateProfile(profile: SshProfile) {
+    const duplicate: SshProfile = {
+      ...profile,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      name: `${profile.name} Copy`,
+      isFavorite: false,
+    };
+    const updatedProfiles = [...profiles, duplicate];
+    await LocalStorage.setItem(STORAGE_KEY, JSON.stringify(updatedProfiles));
+    setProfiles(updatedProfiles);
+    await showToast({
+      style: Toast.Style.Success,
+      title: "SSH profile duplicated",
+      message: duplicate.name,
+    });
+  }
+
   const addProfileAction = (
     <Action.Push
       title="Add SSH Profile"
@@ -403,6 +420,11 @@ export default function Command() {
                   target={
                     <ProfileForm profile={profile} onSave={updateProfile} />
                   }
+                />
+                <Action
+                  title="Duplicate SSH Profile"
+                  icon={Icon.Duplicate}
+                  onAction={() => duplicateProfile(profile)}
                 />
                 {addProfileAction}
                 <Action
