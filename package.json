@@ -1,0 +1,36 @@
+{
+  "name": "ssh-profile-launcher",
+  "title": "SSH Profile Launcher",
+  "version": "1.0.0",
+  "description": "Save and manage SSH connection profiles in Raycast",
+  "icon": "icon.png",
+  "author": "nathparnell",
+  "type": "module",
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "index",
+      "title": "SSH Profiles",
+      "description": "View and add SSH connection profiles",
+      "mode": "view"
+    }
+  ],
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop",
+    "lint": "ray lint"
+  },
+  "dependencies": {
+    "@raycast/api": "^1.102.3",
+    "react": "^19.1.1"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.0.4",
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.1.12",
+    "eslint": "^9.35.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2"
+  },
+  "private": true
+}
