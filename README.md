@@ -1,0 +1,67 @@
+# SSH Profile Launcher for Raycast
+
+A Raycast extension for saving SSH connection profiles and quickly opening them in your system's configured terminal.
+
+## Features
+
+- Save a friendly name, username, and IPv4 address for each SSH profile
+- Search saved profiles from Raycast
+- Press <kbd>Enter</kbd> to connect to the selected profile
+- Edit existing profiles
+- Delete profiles with a confirmation prompt
+- Store profiles locally using Raycast's local storage
+
+## Requirements
+
+- macOS
+- [Raycast](https://www.raycast.com/)
+- Node.js and npm
+- An existing SSH setup, such as a password or SSH key accepted by the remote server
+
+The extension opens an `ssh://username@ip-address` URL. macOS normally handles this with Terminal, although the exact application depends on your system's configured SSH URL handler.
+
+## Development setup
+
+Clone the repository and install its dependencies:
+
+```bash
+npm install
+```
+
+Start the extension in Raycast development mode:
+
+```bash
+npm run dev
+```
+
+Raycast will register the development extension. Open Raycast and search for **SSH Profiles**.
+
+## Usage
+
+1. Open the **SSH Profiles** command in Raycast.
+2. Select **Add SSH Profile**.
+3. Enter a friendly name, SSH username, and IPv4 address.
+4. Save the profile.
+5. Select the profile and press <kbd>Enter</kbd> to connect.
+
+Use the profile's action panel to edit, add, or delete profiles.
+
+## Scripts
+
+```bash
+npm run dev    # Run the extension in development mode
+npm run build  # Build the extension
+npm run lint   # Run Raycast, ESLint, and Prettier checks
+```
+
+## Publishing
+
+Before running the publishing checks or submitting the extension to the Raycast Store, set the `author` field in `package.json` to your registered Raycast username.
+
+## Data storage
+
+Profiles are stored on the local device through Raycast's `LocalStorage` API. They are not uploaded by this extension. Passwords and private keys are not collected or stored.
+
+## License
+
+MIT
