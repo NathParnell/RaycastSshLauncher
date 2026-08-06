@@ -19,14 +19,27 @@ type SshProfile = {
   username: string;
   ipAddress: string;
   port?: number;
+  color?: string;
   isFavorite?: boolean;
 };
 
 type ProfileFormValues = Pick<SshProfile, "name" | "username" | "ipAddress"> & {
   port: string;
+  color: string;
 };
 
 const STORAGE_KEY = "ssh-profiles";
+const DEFAULT_PROFILE_COLOR = "#5E5CE6";
+const PROFILE_COLORS = [
+  { name: "Blue", value: "#5E5CE6" },
+  { name: "Purple", value: "#AF52DE" },
+  { name: "Pink", value: "#FF2D55" },
+  { name: "Red", value: "#FF3B30" },
+  { name: "Orange", value: "#FF9500" },
+  { name: "Yellow", value: "#FFCC00" },
+  { name: "Green", value: "#34C759" },
+  { name: "Grey", value: "#8E8E93" },
+];
 
 function isValidIpAddress(value: string): boolean {
   const parts = value.split(".");
@@ -97,6 +110,7 @@ function ProfileForm({
       username,
       ipAddress,
       port,
+      color: values.color,
       isFavorite: profile?.isFavorite ?? false,
     };
     const profiles = await readProfiles();
@@ -161,6 +175,20 @@ function ProfileForm({
         onChange={() => setPortError(undefined)}
       />
       <Form.Description text="Port is optional. If left empty, the default SSH port 22 will be used." />
+      <Form.Dropdown
+        id="color"
+        title="Colour"
+        defaultValue={profile?.color ?? DEFAULT_PROFILE_COLOR}
+      >
+        {PROFILE_COLORS.map((color) => (
+          <Form.Dropdown.Item
+            key={color.value}
+            value={color.value}
+            title={color.name}
+            icon={{ source: Icon.Circle, tintColor: color.value }}
+          />
+        ))}
+      </Form.Dropdown>
     </Form>
   );
 }
@@ -257,7 +285,10 @@ export default function Command() {
         .map((profile) => (
           <List.Item
             key={profile.id}
-            icon={Icon.Terminal}
+            icon={{
+              source: Icon.Terminal,
+              tintColor: profile.color ?? DEFAULT_PROFILE_COLOR,
+            }}
             title={profile.name}
             subtitle={`${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
             accessories={profile.isFavorite ? [{ icon: Icon.Star }] : undefined}
