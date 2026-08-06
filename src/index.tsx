@@ -55,6 +55,25 @@ function isValidIpAddress(value: string): boolean {
   );
 }
 
+function isValidHostname(value: string): boolean {
+  if (value.length < 1 || value.length > 253) return false;
+  if (/^\d+(?:\.\d+){3}$/.test(value)) return false;
+
+  const hostname = value.endsWith(".") ? value.slice(0, -1) : value;
+  return hostname
+    .split(".")
+    .every(
+      (label) =>
+        label.length >= 1 &&
+        label.length <= 63 &&
+        /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label),
+    );
+}
+
+function isValidHost(value: string): boolean {
+  return isValidIpAddress(value) || isValidHostname(value);
+}
+
 async function readProfiles(): Promise<SshProfile[]> {
   const storedProfiles = await LocalStorage.getItem<string>(STORAGE_KEY);
   if (!storedProfiles) return [];
@@ -93,7 +112,9 @@ function ProfileForm({
     setNameError(name ? undefined : "Enter a friendly name");
     setUsernameError(username ? undefined : "Enter a username");
     setIpAddressError(
-      isValidIpAddress(ipAddress) ? undefined : "Enter a valid IPv4 address",
+      isValidHost(ipAddress)
+        ? undefined
+        : "Enter a valid hostname or IPv4 address",
     );
     setPortError(
       Number.isInteger(port) && port >= 1 && port <= 65535
@@ -104,7 +125,7 @@ function ProfileForm({
     if (
       !name ||
       !username ||
-      !isValidIpAddress(ipAddress) ||
+      !isValidHost(ipAddress) ||
       !Number.isInteger(port) ||
       port < 1 ||
       port > 65535
@@ -168,8 +189,8 @@ function ProfileForm({
       />
       <Form.TextField
         id="ipAddress"
-        title="IP Address"
-        placeholder="192.168.1.100"
+        title="Hostname or IP Address"
+        placeholder="server.example.com or 192.168.1.100"
         defaultValue={profile?.ipAddress}
         error={ipAddressError}
         onChange={() => setIpAddressError(undefined)}
@@ -229,7 +250,10 @@ function ProfileDetails({
             text={`${profile.username}@${profile.ipAddress}`}
           />
           <Detail.Metadata.Label title="Username" text={profile.username} />
-          <Detail.Metadata.Label title="IP Address" text={profile.ipAddress} />
+          <Detail.Metadata.Label
+            title="Hostname or IP"
+            text={profile.ipAddress}
+          />
           <Detail.Metadata.Label
             title="Port"
             text={String(profile.port ?? 22)}
