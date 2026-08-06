@@ -4,7 +4,7 @@ A Raycast extension for saving SSH connection profiles and quickly opening them 
 
 ## Features
 
-- Save a friendly name, username, and IPv4 address for each SSH profile
+- Save a friendly name, username, IPv4 address, and port for each SSH profile
 - Search saved profiles from Raycast
 - Mark profiles as favourites and keep them at the top of the list
 - Press <kbd>Enter</kbd> to connect to the selected profile
@@ -51,7 +51,7 @@ Raycast will register the development extension. Open Raycast and search for **S
 
 1. Open the **SSH Profiles** command in Raycast.
 2. Select **Add SSH Profile**.
-3. Enter a friendly name, SSH username, and IPv4 address.
+3. Enter a friendly name, SSH username, and IPv4 address. The port is optional; leave it empty to use the default SSH port, `22`.
 4. Save the profile.
 5. Select the profile and press <kbd>Enter</kbd> to connect.
 

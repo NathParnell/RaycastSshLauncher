@@ -18,10 +18,13 @@ type SshProfile = {
   name: string;
   username: string;
   ipAddress: string;
+  port?: number;
   isFavorite?: boolean;
 };
 
-type ProfileFormValues = Pick<SshProfile, "name" | "username" | "ipAddress">;
+type ProfileFormValues = Pick<SshProfile, "name" | "username" | "ipAddress"> & {
+  port: string;
+};
 
 const STORAGE_KEY = "ssh-profiles";
 
@@ -58,25 +61,42 @@ function ProfileForm({
   const [nameError, setNameError] = useState<string>();
   const [usernameError, setUsernameError] = useState<string>();
   const [ipAddressError, setIpAddressError] = useState<string>();
+  const [portError, setPortError] = useState<string>();
 
   async function handleSubmit(values: ProfileFormValues) {
     const name = values.name.trim();
     const username = values.username.trim();
     const ipAddress = values.ipAddress.trim();
+    const portValue = values.port.trim();
+    const port = portValue ? Number(portValue) : 22;
 
     setNameError(name ? undefined : "Enter a friendly name");
     setUsernameError(username ? undefined : "Enter a username");
     setIpAddressError(
       isValidIpAddress(ipAddress) ? undefined : "Enter a valid IPv4 address",
     );
+    setPortError(
+      Number.isInteger(port) && port >= 1 && port <= 65535
+        ? undefined
+        : "Enter a port between 1 and 65535",
+    );
 
-    if (!name || !username || !isValidIpAddress(ipAddress)) return;
+    if (
+      !name ||
+      !username ||
+      !isValidIpAddress(ipAddress) ||
+      !Number.isInteger(port) ||
+      port < 1 ||
+      port > 65535
+    )
+      return;
 
     const savedProfile: SshProfile = {
       id: profile?.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       name,
       username,
       ipAddress,
+      port,
       isFavorite: profile?.isFavorite ?? false,
     };
     const profiles = await readProfiles();
@@ -132,6 +152,15 @@ function ProfileForm({
         error={ipAddressError}
         onChange={() => setIpAddressError(undefined)}
       />
+      <Form.TextField
+        id="port"
+        title="Port"
+        placeholder="22 (default)"
+        defaultValue={profile?.port ? String(profile.port) : ""}
+        error={portError}
+        onChange={() => setPortError(undefined)}
+      />
+      <Form.Description text="Port is optional. If left empty, the default SSH port 22 will be used." />
     </Form>
   );
 }
@@ -230,14 +259,14 @@ export default function Command() {
             key={profile.id}
             icon={Icon.Terminal}
             title={profile.name}
-            subtitle={`${profile.username}@${profile.ipAddress}`}
+            subtitle={`${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
             accessories={profile.isFavorite ? [{ icon: Icon.Star }] : undefined}
             actions={
               <ActionPanel>
                 <Action.Open
                   title="Connect via SSH"
                   icon={Icon.Terminal}
-                  target={`ssh://${profile.username}@${profile.ipAddress}`}
+                  target={`ssh://${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
                 />
                 <Action
                   title={
