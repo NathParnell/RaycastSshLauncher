@@ -18,6 +18,16 @@ A Raycast extension for saving SSH connection profiles and quickly opening them 
 - Node.js and npm
 - An existing SSH setup, such as a password or SSH key accepted by the remote server
 
+You must configure and test the SSH connection before adding it to this extension. The extension launches existing SSH connections; it does not configure authentication, passwords, keys, or the remote server for you.
+
+Confirm that you can connect successfully from Terminal first:
+
+```bash
+ssh username@ip-address
+```
+
+Once that command works, add the same username and IP address to the Raycast extension.
+
 The extension opens an `ssh://username@ip-address` URL. macOS normally handles this with Terminal, although the exact application depends on your system's configured SSH URL handler.
 
 ## Development setup
