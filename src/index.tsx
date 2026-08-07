@@ -12,6 +12,15 @@ import {
   confirmAlert,
   useNavigation,
 } from "@raycast/api";
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
 import { useEffect, useState } from "react";
 
 type SshProfile = {
@@ -31,8 +40,29 @@ type ProfileFormValues = Pick<SshProfile, "name" | "username" | "ipAddress"> & {
   notes: string;
 };
 
+type SshConfigHost = {
+  id: string;
+  alias: string;
+  hostName?: string;
+  username?: string;
+  port?: number;
+  configPath: string;
+  isManaged?: boolean;
+};
+
+type SshConfigExportFormValues = {
+  alias: string;
+};
+
+type ProfileSourceFilter = "saved" | "ssh-config";
+
 const STORAGE_KEY = "ssh-profiles";
+const SOURCE_FILTER_STORAGE_KEY = "ssh-profile-source-filter";
 const DEFAULT_PROFILE_COLOR = "#5E5CE6";
+const SSH_CONFIG_PATH = path.join(homedir(), ".ssh", "config");
+const SSH_CONFIG_LEGACY_MARKER = "# Added by Raycast SSH Profile Launcher";
+const SSH_CONFIG_BEGIN_MARKER_PREFIX = "# BEGIN Raycast SSH Profile Launcher:";
+const SSH_CONFIG_END_MARKER_PREFIX = "# END Raycast SSH Profile Launcher:";
 const PROFILE_COLORS = [
   { name: "Blue", value: "#5E5CE6" },
   { name: "Purple", value: "#AF52DE" },
@@ -85,8 +115,341 @@ async function readProfiles(): Promise<SshProfile[]> {
   }
 }
 
+async function readProfileSourceFilter(): Promise<ProfileSourceFilter> {
+  const storedFilter = await LocalStorage.getItem<string>(
+    SOURCE_FILTER_STORAGE_KEY,
+  );
+  return storedFilter === "ssh-config" ? "ssh-config" : "saved";
+}
+
+function stripInlineComment(line: string): string {
+  const hashIndex = line.indexOf("#");
+  return hashIndex === -1 ? line : line.slice(0, hashIndex);
+}
+
+function hasSshPattern(value: string): boolean {
+  return /[*?!]/.test(value) || value.startsWith("!");
+}
+
+function isConcreteSshAlias(value: string): boolean {
+  return /^[a-zA-Z0-9._-]+$/.test(value) && !hasSshPattern(value);
+}
+
+function expandSshPath(value: string, configDirectory: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return path.join(homedir(), value.slice(2));
+  if (path.isAbsolute(value)) return value;
+  return path.resolve(configDirectory, value);
+}
+
+async function expandIncludePattern(pattern: string): Promise<string[]> {
+  if (!pattern.includes("*")) return [pattern];
+
+  const segments = pattern.split(path.sep);
+  const results: string[] = [];
+
+  async function walk(segmentIndex: number, currentPath: string) {
+    if (segmentIndex === segments.length) {
+      results.push(currentPath);
+      return;
+    }
+
+    const segment = segments[segmentIndex];
+    if (!segment.includes("*")) {
+      await walk(
+        segmentIndex + 1,
+        currentPath ? path.join(currentPath, segment) : segment,
+      );
+      return;
+    }
+
+    const directory = currentPath || path.sep;
+    const matcher = new RegExp(
+      `^${segment
+        .split("*")
+        .map((part) => part.replace(/[|\\{}()[\]^$+?.]/g, "\\$&"))
+        .join(".*")}$`,
+    );
+
+    try {
+      const entries = await readdir(directory, { withFileTypes: true });
+      await Promise.all(
+        entries
+          .filter((entry) => matcher.test(entry.name))
+          .map((entry) =>
+            walk(segmentIndex + 1, path.join(directory, entry.name)),
+          ),
+      );
+    } catch {
+      // OpenSSH silently ignores Include globs that do not match.
+    }
+  }
+
+  await walk(0, pattern.startsWith(path.sep) ? path.sep : "");
+  return results;
+}
+
+async function parseSshConfigFile(
+  configPath: string,
+  visitedPaths = new Set<string>(),
+): Promise<SshConfigHost[]> {
+  const resolvedConfigPath = path.resolve(configPath);
+  if (visitedPaths.has(resolvedConfigPath)) return [];
+  visitedPaths.add(resolvedConfigPath);
+
+  let contents: string;
+  try {
+    contents = await readFile(resolvedConfigPath, "utf8");
+  } catch {
+    return [];
+  }
+
+  const hosts: SshConfigHost[] = [];
+  let currentAliases: string[] = [];
+  let currentOptions: Record<string, string> = {};
+  let currentHostIsManaged = false;
+  let currentManagedAlias: string | undefined;
+  let pendingManagedAlias: string | undefined;
+  let pendingLegacyManagedHost = false;
+
+  function flushHost() {
+    if (currentAliases.length === 0) return;
+
+    const port = currentOptions.port ? Number(currentOptions.port) : undefined;
+    for (const alias of currentAliases) {
+      if (!isConcreteSshAlias(alias)) continue;
+
+      hosts.push({
+        id: `${resolvedConfigPath}:${alias}`,
+        alias,
+        hostName: currentOptions.hostname,
+        username: currentOptions.user,
+        port:
+          Number.isInteger(port) && port && port >= 1 && port <= 65535
+            ? port
+            : undefined,
+        configPath: resolvedConfigPath,
+        isManaged:
+          currentHostIsManaged &&
+          (!currentManagedAlias ||
+            currentManagedAlias.toLowerCase() === alias.toLowerCase()),
+      });
+    }
+  }
+
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const trimmedRawLine = rawLine.trim();
+    if (trimmedRawLine.startsWith(SSH_CONFIG_BEGIN_MARKER_PREFIX)) {
+      pendingManagedAlias = trimmedRawLine
+        .slice(SSH_CONFIG_BEGIN_MARKER_PREFIX.length)
+        .trim();
+      pendingLegacyManagedHost = false;
+      continue;
+    }
+    if (trimmedRawLine === SSH_CONFIG_LEGACY_MARKER) {
+      pendingLegacyManagedHost = true;
+      pendingManagedAlias = undefined;
+      continue;
+    }
+
+    const line = stripInlineComment(rawLine).trim();
+    if (!line) continue;
+
+    const [keyword, ...valueParts] = line.split(/\s+/);
+    const normalizedKeyword = keyword.toLowerCase();
+    const value = valueParts.join(" ").trim();
+
+    if (normalizedKeyword === "include") {
+      const includePatterns = valueParts.map((includePath) =>
+        expandSshPath(includePath, path.dirname(resolvedConfigPath)),
+      );
+      const includePaths = (
+        await Promise.all(includePatterns.map(expandIncludePattern))
+      ).flat();
+      const includedHosts = (
+        await Promise.all(
+          includePaths.map((includePath) =>
+            parseSshConfigFile(includePath, visitedPaths),
+          ),
+        )
+      ).flat();
+      hosts.push(...includedHosts);
+      continue;
+    }
+
+    if (normalizedKeyword === "host") {
+      flushHost();
+      currentAliases = valueParts.filter(isConcreteSshAlias);
+      currentOptions = {};
+      currentHostIsManaged = Boolean(
+        pendingManagedAlias || pendingLegacyManagedHost,
+      );
+      currentManagedAlias = pendingManagedAlias;
+      pendingManagedAlias = undefined;
+      pendingLegacyManagedHost = false;
+      continue;
+    }
+
+    if (currentAliases.length === 0) continue;
+    if (["hostname", "user", "port"].includes(normalizedKeyword)) {
+      currentOptions[normalizedKeyword] = value;
+    }
+  }
+
+  flushHost();
+  return hosts;
+}
+
+async function readSshConfigHosts(): Promise<SshConfigHost[]> {
+  const hosts = await parseSshConfigFile(SSH_CONFIG_PATH);
+  const seenAliases = new Set<string>();
+
+  return hosts.filter((host) => {
+    const normalizedAlias = host.alias.toLowerCase();
+    if (seenAliases.has(normalizedAlias)) return false;
+    seenAliases.add(normalizedAlias);
+    return true;
+  });
+}
+
 function escapeMarkdown(value: string): string {
   return value.replace(/([\\`*_{}[\]()<>#+\-.!|])/g, "\\$1");
+}
+
+function sshUrlForProfile(profile: SshProfile): string {
+  return `ssh://${encodeURIComponent(profile.username)}@${profile.ipAddress}:${profile.port ?? 22}`;
+}
+
+function sshUrlForConfigHost(host: SshConfigHost): string {
+  return `ssh://${host.alias}`;
+}
+
+function defaultSshAliasForProfile(profile: SshProfile): string {
+  const alias = profile.name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return alias || profile.ipAddress.split(".")[0] || "ssh-host";
+}
+
+function buildSshConfigBlock(profile: SshProfile, alias: string): string {
+  return [
+    `${SSH_CONFIG_BEGIN_MARKER_PREFIX} ${alias}`,
+    `Host ${alias}`,
+    `  HostName ${profile.ipAddress}`,
+    `  User ${profile.username}`,
+    `  Port ${profile.port ?? 22}`,
+    `${SSH_CONFIG_END_MARKER_PREFIX} ${alias}`,
+    "",
+  ].join("\n");
+}
+
+async function appendProfileToSshConfig(profile: SshProfile, alias: string) {
+  await mkdir(path.dirname(SSH_CONFIG_PATH), { recursive: true, mode: 0o700 });
+
+  let existingContents = "";
+  try {
+    existingContents = await readFile(SSH_CONFIG_PATH, "utf8");
+  } catch {
+    // Missing config files are created on export.
+  }
+
+  const prefix =
+    existingContents.length === 0
+      ? ""
+      : existingContents.endsWith("\n\n")
+        ? ""
+        : existingContents.endsWith("\n")
+          ? "\n"
+          : "\n\n";
+  await appendFile(
+    SSH_CONFIG_PATH,
+    `${prefix}${buildSshConfigBlock(profile, alias)}`,
+    {
+      mode: 0o600,
+    },
+  );
+}
+
+function lineStartsHostOrMatchBlock(line: string): boolean {
+  return /^(host|match)\s+/i.test(stripInlineComment(line).trim());
+}
+
+function hostLineIncludesAlias(line: string, alias: string): boolean {
+  const [keyword, ...aliases] = stripInlineComment(line).trim().split(/\s+/);
+  return (
+    keyword?.toLowerCase() === "host" &&
+    aliases.some(
+      (currentAlias) => currentAlias.toLowerCase() === alias.toLowerCase(),
+    )
+  );
+}
+
+function removeManagedSshConfigBlock(
+  contents: string,
+  alias: string,
+): string | undefined {
+  const lines = contents.split("\n");
+  const normalizedAlias = alias.toLowerCase();
+  const beginMarker =
+    `${SSH_CONFIG_BEGIN_MARKER_PREFIX} ${alias}`.toLowerCase();
+  const endMarker = `${SSH_CONFIG_END_MARKER_PREFIX} ${alias}`.toLowerCase();
+
+  const beginIndex = lines.findIndex(
+    (line) => line.trim().toLowerCase() === beginMarker,
+  );
+  if (beginIndex !== -1) {
+    const endIndex = lines.findIndex(
+      (line, index) =>
+        index > beginIndex && line.trim().toLowerCase() === endMarker,
+    );
+    if (endIndex === -1) return undefined;
+
+    const removalEndIndex =
+      lines[endIndex + 1] === "" ? endIndex + 1 : endIndex;
+    return lines
+      .filter((_, index) => index < beginIndex || index > removalEndIndex)
+      .join("\n");
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    if (lines[index].trim() !== SSH_CONFIG_LEGACY_MARKER) continue;
+
+    let hostIndex = index + 1;
+    while (hostIndex < lines.length && lines[hostIndex].trim() === "") {
+      hostIndex++;
+    }
+
+    if (!hostLineIncludesAlias(lines[hostIndex] ?? "", normalizedAlias))
+      continue;
+
+    let endIndex = hostIndex + 1;
+    while (
+      endIndex < lines.length &&
+      !lineStartsHostOrMatchBlock(lines[endIndex])
+    ) {
+      endIndex++;
+    }
+    if (lines[endIndex - 1] === "") endIndex--;
+
+    return lines
+      .filter((_, lineIndex) => lineIndex < index || lineIndex >= endIndex)
+      .join("\n");
+  }
+
+  return undefined;
+}
+
+async function removeSshConfigHost(host: SshConfigHost) {
+  const contents = await readFile(host.configPath, "utf8");
+  const updatedContents = removeManagedSshConfigBlock(contents, host.alias);
+  if (updatedContents === undefined) {
+    throw new Error("No managed SSH config block was found for this host.");
+  }
+
+  await writeFile(host.configPath, updatedContents, { mode: 0o600 });
 }
 
 function ProfileForm({
@@ -231,9 +594,13 @@ function ProfileForm({
 function ProfileDetails({
   profile,
   onUpdate,
+  existingSshConfigAliases,
+  onExport,
 }: {
   profile: SshProfile;
   onUpdate: (profile: SshProfile) => void;
+  existingSshConfigAliases: Set<string>;
+  onExport: () => void;
 }) {
   const notes = profile.notes
     ? escapeMarkdown(profile.notes)
@@ -280,15 +647,153 @@ function ProfileDetails({
       actions={
         <ActionPanel>
           <Action.Open
-            title="Connect via SSH"
+            title="Connect Via SSH"
             icon={Icon.Terminal}
-            target={`ssh://${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
+            target={sshUrlForProfile(profile)}
           />
           <Action.Push
             title="Edit SSH Profile"
             icon={Icon.Pencil}
             target={<ProfileForm profile={profile} onSave={onUpdate} />}
           />
+          <Action.Push
+            title="Save to SSH Config"
+            icon={Icon.Document}
+            target={
+              <SshConfigExportForm
+                profile={profile}
+                existingAliases={existingSshConfigAliases}
+                onExport={onExport}
+              />
+            }
+          />
+        </ActionPanel>
+      }
+    />
+  );
+}
+
+function SshConfigExportForm({
+  profile,
+  existingAliases,
+  onExport,
+}: {
+  profile: SshProfile;
+  existingAliases: Set<string>;
+  onExport: () => void;
+}) {
+  const { pop } = useNavigation();
+  const [aliasError, setAliasError] = useState<string>();
+
+  async function handleSubmit(values: SshConfigExportFormValues) {
+    const alias = values.alias.trim();
+    const normalizedAlias = alias.toLowerCase();
+
+    if (!isConcreteSshAlias(alias)) {
+      setAliasError("Use letters, numbers, dots, underscores, or hyphens");
+      return;
+    }
+
+    const currentAliases = new Set([
+      ...existingAliases,
+      ...(await readSshConfigHosts()).map((host) => host.alias.toLowerCase()),
+    ]);
+
+    if (currentAliases.has(normalizedAlias)) {
+      setAliasError("This SSH config host already exists");
+      return;
+    }
+
+    await appendProfileToSshConfig(profile, alias);
+    onExport();
+    await showToast({
+      style: Toast.Style.Success,
+      title: "Saved to SSH Config",
+      message: alias,
+    });
+    pop();
+  }
+
+  return (
+    <Form
+      navigationTitle="Save to SSH Config"
+      actions={
+        <ActionPanel>
+          <Action.SubmitForm
+            title="Save to SSH Config"
+            icon={Icon.Checkmark}
+            onSubmit={handleSubmit}
+          />
+        </ActionPanel>
+      }
+    >
+      <Form.TextField
+        id="alias"
+        title="Host Alias"
+        placeholder="staging"
+        defaultValue={defaultSshAliasForProfile(profile)}
+        error={aliasError}
+        onChange={() => setAliasError(undefined)}
+      />
+      <Form.Description
+        text={`This appends a Host block to ${SSH_CONFIG_PATH}. Existing SSH config hosts are not overwritten.`}
+      />
+      <Form.Description
+        text={`HostName ${profile.ipAddress}\nUser ${profile.username}\nPort ${profile.port ?? 22}`}
+      />
+    </Form>
+  );
+}
+
+function SshConfigHostDetails({
+  host,
+  onDelete,
+}: {
+  host: SshConfigHost;
+  onDelete: (host: SshConfigHost) => void;
+}) {
+  return (
+    <Detail
+      navigationTitle={host.alias}
+      markdown={`# ${escapeMarkdown(host.alias)}\n\nLoaded from \`${escapeMarkdown(host.configPath)}\`.`}
+      metadata={
+        <Detail.Metadata>
+          <Detail.Metadata.Label title="Host Alias" text={host.alias} />
+          <Detail.Metadata.Label
+            title="HostName"
+            text={host.hostName ?? "Not set"}
+          />
+          <Detail.Metadata.Label
+            title="User"
+            text={host.username ?? "Not set"}
+          />
+          <Detail.Metadata.Label
+            title="Port"
+            text={host.port ? String(host.port) : "Default"}
+          />
+          <Detail.Metadata.Label
+            title="Managed by Extension"
+            text={host.isManaged ? "Yes" : "No"}
+          />
+          <Detail.Metadata.Separator />
+          <Detail.Metadata.Label title="Config File" text={host.configPath} />
+        </Detail.Metadata>
+      }
+      actions={
+        <ActionPanel>
+          <Action.Open
+            title="Connect Via SSH"
+            icon={Icon.Terminal}
+            target={sshUrlForConfigHost(host)}
+          />
+          {host.isManaged ? (
+            <Action
+              title="Delete from SSH Config"
+              icon={Icon.Trash}
+              style={Action.Style.Destructive}
+              onAction={() => onDelete(host)}
+            />
+          ) : null}
         </ActionPanel>
       }
     />
@@ -297,13 +802,28 @@ function ProfileDetails({
 
 export default function Command() {
   const [profiles, setProfiles] = useState<SshProfile[]>([]);
+  const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHost[]>([]);
+  const [profileSourceFilter, setProfileSourceFilter] =
+    useState<ProfileSourceFilter>("saved");
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    readProfiles()
-      .then(setProfiles)
+    Promise.all([
+      readProfiles(),
+      readSshConfigHosts(),
+      readProfileSourceFilter(),
+    ])
+      .then(([storedProfiles, configHosts, storedSourceFilter]) => {
+        setProfiles(storedProfiles);
+        setSshConfigHosts(configHosts);
+        setProfileSourceFilter(storedSourceFilter);
+      })
       .finally(() => setIsLoading(false));
   }, []);
+
+  async function refreshSshConfigHosts() {
+    setSshConfigHosts(await readSshConfigHosts());
+  }
 
   function addProfile(profile: SshProfile) {
     setProfiles((currentProfiles) => [...currentProfiles, profile]);
@@ -376,6 +896,41 @@ export default function Command() {
     });
   }
 
+  async function deleteSshConfigHost(host: SshConfigHost) {
+    const confirmed = await confirmAlert({
+      title: `Delete ${host.alias} from SSH config?`,
+      message: `This removes the managed Host block from ${host.configPath}.`,
+      primaryAction: {
+        title: "Delete Host",
+        style: Alert.ActionStyle.Destructive,
+      },
+    });
+    if (!confirmed) return;
+
+    try {
+      await removeSshConfigHost(host);
+      await refreshSshConfigHosts();
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Deleted from SSH Config",
+        message: host.alias,
+      });
+    } catch (error) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Could Not Delete SSH Config Host",
+        message: error instanceof Error ? error.message : host.alias,
+      });
+    }
+  }
+
+  async function changeProfileSourceFilter(nextFilter: string) {
+    const sourceFilter: ProfileSourceFilter =
+      nextFilter === "ssh-config" ? "ssh-config" : "saved";
+    setProfileSourceFilter(sourceFilter);
+    await LocalStorage.setItem(SOURCE_FILTER_STORAGE_KEY, sourceFilter);
+  }
+
   const addProfileAction = (
     <Action.Push
       title="Add SSH Profile"
@@ -384,83 +939,197 @@ export default function Command() {
     />
   );
 
+  const existingSshConfigAliases = new Set(
+    sshConfigHosts.map((host) => host.alias.toLowerCase()),
+  );
+
+  function exportProfileAction(profile: SshProfile) {
+    return (
+      <Action.Push
+        title="Save to SSH Config"
+        icon={Icon.Document}
+        target={
+          <SshConfigExportForm
+            profile={profile}
+            existingAliases={existingSshConfigAliases}
+            onExport={refreshSshConfigHosts}
+          />
+        }
+      />
+    );
+  }
+
+  const shouldShowSavedProfiles = profileSourceFilter === "saved";
+  const shouldShowSshConfigHosts = profileSourceFilter === "ssh-config";
+  const hasVisibleProfiles =
+    (shouldShowSavedProfiles && profiles.length > 0) ||
+    (shouldShowSshConfigHosts && sshConfigHosts.length > 0);
+
   return (
-    <List isLoading={isLoading} searchBarPlaceholder="Search SSH profiles...">
-      {profiles.length === 0 && !isLoading ? (
+    <List
+      isLoading={isLoading}
+      searchBarPlaceholder="Search SSH profiles..."
+      searchBarAccessory={
+        <List.Dropdown
+          tooltip="Profile Source"
+          value={profileSourceFilter}
+          onChange={changeProfileSourceFilter}
+        >
+          <List.Dropdown.Item
+            title="Saved Profiles"
+            value="saved"
+            icon={Icon.HardDrive}
+          />
+          <List.Dropdown.Item
+            title="SSH Config"
+            value="ssh-config"
+            icon={Icon.Terminal}
+          />
+        </List.Dropdown>
+      }
+    >
+      {!hasVisibleProfiles && !isLoading ? (
         <List.EmptyView
           icon={Icon.Terminal}
-          title="No SSH Profiles"
-          description="Add a profile to get started."
+          title={
+            shouldShowSshConfigHosts
+              ? "No SSH Config Hosts"
+              : "No Saved Profiles"
+          }
+          description={
+            shouldShowSshConfigHosts
+              ? "Create concrete Host aliases in ~/.ssh/config to show them here."
+              : "Add a profile to get started."
+          }
           actions={<ActionPanel>{addProfileAction}</ActionPanel>}
         />
       ) : null}
 
-      {[...profiles]
-        .sort(
-          (firstProfile, secondProfile) =>
-            Number(Boolean(secondProfile.isFavorite)) -
-            Number(Boolean(firstProfile.isFavorite)),
-        )
-        .map((profile) => (
-          <List.Item
-            key={profile.id}
-            icon={{
-              source: Icon.Terminal,
-              tintColor: profile.color ?? DEFAULT_PROFILE_COLOR,
-            }}
-            title={profile.name}
-            subtitle={`${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
-            keywords={profile.notes ? [profile.notes] : undefined}
-            accessories={profile.isFavorite ? [{ icon: Icon.Star }] : undefined}
-            actions={
-              <ActionPanel>
-                <Action.Open
-                  title="Connect via SSH"
-                  icon={Icon.Terminal}
-                  target={`ssh://${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
-                />
-                <Action.Push
-                  title="View Profile Details"
-                  icon={Icon.Eye}
-                  target={
-                    <ProfileDetails
-                      profile={profile}
-                      onUpdate={updateProfile}
+      {shouldShowSavedProfiles && profiles.length > 0 ? (
+        <List.Section title="Saved Profiles">
+          {[...profiles]
+            .sort(
+              (firstProfile, secondProfile) =>
+                Number(Boolean(secondProfile.isFavorite)) -
+                Number(Boolean(firstProfile.isFavorite)),
+            )
+            .map((profile) => (
+              <List.Item
+                key={profile.id}
+                icon={{
+                  source: Icon.Terminal,
+                  tintColor: profile.color ?? DEFAULT_PROFILE_COLOR,
+                }}
+                title={profile.name}
+                subtitle={`${profile.username}@${profile.ipAddress}:${profile.port ?? 22}`}
+                keywords={profile.notes ? [profile.notes] : undefined}
+                accessories={
+                  profile.isFavorite ? [{ icon: Icon.Star }] : undefined
+                }
+                actions={
+                  <ActionPanel>
+                    <Action.Open
+                      title="Connect Via SSH"
+                      icon={Icon.Terminal}
+                      target={sshUrlForProfile(profile)}
                     />
-                  }
-                />
-                <Action
-                  title={
-                    profile.isFavorite
-                      ? "Remove from Favourites"
-                      : "Add to Favourites"
-                  }
-                  icon={Icon.Star}
-                  onAction={() => toggleFavorite(profile)}
-                />
-                <Action.Push
-                  title="Edit SSH Profile"
-                  icon={Icon.Pencil}
-                  target={
-                    <ProfileForm profile={profile} onSave={updateProfile} />
-                  }
-                />
-                <Action
-                  title="Duplicate SSH Profile"
-                  icon={Icon.Duplicate}
-                  onAction={() => duplicateProfile(profile)}
-                />
-                {addProfileAction}
-                <Action
-                  title="Delete SSH Profile"
-                  icon={Icon.Trash}
-                  style={Action.Style.Destructive}
-                  onAction={() => deleteProfile(profile)}
-                />
-              </ActionPanel>
-            }
-          />
-        ))}
+                    <Action.Push
+                      title="View Profile Details"
+                      icon={Icon.Eye}
+                      target={
+                        <ProfileDetails
+                          profile={profile}
+                          onUpdate={updateProfile}
+                          existingSshConfigAliases={existingSshConfigAliases}
+                          onExport={refreshSshConfigHosts}
+                        />
+                      }
+                    />
+                    <Action
+                      title={
+                        profile.isFavorite
+                          ? "Remove from Favourites"
+                          : "Add to Favourites"
+                      }
+                      icon={Icon.Star}
+                      onAction={() => toggleFavorite(profile)}
+                    />
+                    <Action.Push
+                      title="Edit SSH Profile"
+                      icon={Icon.Pencil}
+                      target={
+                        <ProfileForm profile={profile} onSave={updateProfile} />
+                      }
+                    />
+                    <Action
+                      title="Duplicate SSH Profile"
+                      icon={Icon.Duplicate}
+                      onAction={() => duplicateProfile(profile)}
+                    />
+                    {exportProfileAction(profile)}
+                    {addProfileAction}
+                    <Action
+                      title="Delete SSH Profile"
+                      icon={Icon.Trash}
+                      style={Action.Style.Destructive}
+                      onAction={() => deleteProfile(profile)}
+                    />
+                  </ActionPanel>
+                }
+              />
+            ))}
+        </List.Section>
+      ) : null}
+
+      {shouldShowSshConfigHosts && sshConfigHosts.length > 0 ? (
+        <List.Section title="~/.ssh/config">
+          {sshConfigHosts.map((host) => (
+            <List.Item
+              key={host.id}
+              icon={Icon.Terminal}
+              title={host.alias}
+              subtitle={[
+                host.username ? `${host.username}@` : "",
+                host.hostName ?? host.alias,
+                host.port ? `:${host.port}` : "",
+              ].join("")}
+              keywords={
+                [host.hostName, host.username, host.configPath].filter(
+                  Boolean,
+                ) as string[]
+              }
+              actions={
+                <ActionPanel>
+                  <Action.Open
+                    title="Connect Via SSH"
+                    icon={Icon.Terminal}
+                    target={sshUrlForConfigHost(host)}
+                  />
+                  <Action.Push
+                    title="View Host Details"
+                    icon={Icon.Eye}
+                    target={
+                      <SshConfigHostDetails
+                        host={host}
+                        onDelete={deleteSshConfigHost}
+                      />
+                    }
+                  />
+                  {host.isManaged ? (
+                    <Action
+                      title="Delete from SSH Config"
+                      icon={Icon.Trash}
+                      style={Action.Style.Destructive}
+                      onAction={() => deleteSshConfigHost(host)}
+                    />
+                  ) : null}
+                  {addProfileAction}
+                </ActionPanel>
+              }
+            />
+          ))}
+        </List.Section>
+      ) : null}
     </List>
   );
 }
