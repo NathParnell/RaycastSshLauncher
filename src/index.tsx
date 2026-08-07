@@ -54,7 +54,10 @@ type SshConfigExportFormValues = {
   alias: string;
 };
 
+type ProfileSourceFilter = "saved" | "ssh-config";
+
 const STORAGE_KEY = "ssh-profiles";
+const SOURCE_FILTER_STORAGE_KEY = "ssh-profile-source-filter";
 const DEFAULT_PROFILE_COLOR = "#5E5CE6";
 const SSH_CONFIG_PATH = path.join(homedir(), ".ssh", "config");
 const SSH_CONFIG_LEGACY_MARKER = "# Added by Raycast SSH Profile Launcher";
@@ -110,6 +113,13 @@ async function readProfiles(): Promise<SshProfile[]> {
   } catch {
     return [];
   }
+}
+
+async function readProfileSourceFilter(): Promise<ProfileSourceFilter> {
+  const storedFilter = await LocalStorage.getItem<string>(
+    SOURCE_FILTER_STORAGE_KEY,
+  );
+  return storedFilter === "ssh-config" ? "ssh-config" : "saved";
 }
 
 function stripInlineComment(line: string): string {
@@ -793,13 +803,20 @@ function SshConfigHostDetails({
 export default function Command() {
   const [profiles, setProfiles] = useState<SshProfile[]>([]);
   const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHost[]>([]);
+  const [profileSourceFilter, setProfileSourceFilter] =
+    useState<ProfileSourceFilter>("saved");
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([readProfiles(), readSshConfigHosts()])
-      .then(([storedProfiles, configHosts]) => {
+    Promise.all([
+      readProfiles(),
+      readSshConfigHosts(),
+      readProfileSourceFilter(),
+    ])
+      .then(([storedProfiles, configHosts, storedSourceFilter]) => {
         setProfiles(storedProfiles);
         setSshConfigHosts(configHosts);
+        setProfileSourceFilter(storedSourceFilter);
       })
       .finally(() => setIsLoading(false));
   }, []);
@@ -907,6 +924,13 @@ export default function Command() {
     }
   }
 
+  async function changeProfileSourceFilter(nextFilter: string) {
+    const sourceFilter: ProfileSourceFilter =
+      nextFilter === "ssh-config" ? "ssh-config" : "saved";
+    setProfileSourceFilter(sourceFilter);
+    await LocalStorage.setItem(SOURCE_FILTER_STORAGE_KEY, sourceFilter);
+  }
+
   const addProfileAction = (
     <Action.Push
       title="Add SSH Profile"
@@ -935,18 +959,53 @@ export default function Command() {
     );
   }
 
+  const shouldShowSavedProfiles = profileSourceFilter === "saved";
+  const shouldShowSshConfigHosts = profileSourceFilter === "ssh-config";
+  const hasVisibleProfiles =
+    (shouldShowSavedProfiles && profiles.length > 0) ||
+    (shouldShowSshConfigHosts && sshConfigHosts.length > 0);
+
   return (
-    <List isLoading={isLoading} searchBarPlaceholder="Search SSH profiles...">
-      {profiles.length === 0 && sshConfigHosts.length === 0 && !isLoading ? (
+    <List
+      isLoading={isLoading}
+      searchBarPlaceholder="Search SSH profiles..."
+      searchBarAccessory={
+        <List.Dropdown
+          tooltip="Profile Source"
+          value={profileSourceFilter}
+          onChange={changeProfileSourceFilter}
+        >
+          <List.Dropdown.Item
+            title="Saved Profiles"
+            value="saved"
+            icon={Icon.HardDrive}
+          />
+          <List.Dropdown.Item
+            title="SSH Config"
+            value="ssh-config"
+            icon={Icon.Terminal}
+          />
+        </List.Dropdown>
+      }
+    >
+      {!hasVisibleProfiles && !isLoading ? (
         <List.EmptyView
           icon={Icon.Terminal}
-          title="No SSH Profiles"
-          description="Add a profile or create hosts in ~/.ssh/config to get started."
+          title={
+            shouldShowSshConfigHosts
+              ? "No SSH Config Hosts"
+              : "No Saved Profiles"
+          }
+          description={
+            shouldShowSshConfigHosts
+              ? "Create concrete Host aliases in ~/.ssh/config to show them here."
+              : "Add a profile to get started."
+          }
           actions={<ActionPanel>{addProfileAction}</ActionPanel>}
         />
       ) : null}
 
-      {profiles.length > 0 ? (
+      {shouldShowSavedProfiles && profiles.length > 0 ? (
         <List.Section title="Saved Profiles">
           {[...profiles]
             .sort(
@@ -1022,7 +1081,7 @@ export default function Command() {
         </List.Section>
       ) : null}
 
-      {sshConfigHosts.length > 0 ? (
+      {shouldShowSshConfigHosts && sshConfigHosts.length > 0 ? (
         <List.Section title="~/.ssh/config">
           {sshConfigHosts.map((host) => (
             <List.Item

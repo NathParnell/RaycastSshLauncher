@@ -10,6 +10,7 @@ A Raycast extension for saving SSH connection profiles and quickly opening them 
 - View notes and connection metadata on a dedicated profile details page
 - Duplicate an existing profile to quickly create a similar connection
 - Search saved profiles from Raycast
+- Filter the list between saved profiles and SSH config hosts, with the selection remembered
 - Automatically list concrete `Host` aliases from `~/.ssh/config`
 - Save Raycast profiles to `~/.ssh/config` as OpenSSH `Host` entries
 - Delete SSH config entries created by this extension
@@ -41,6 +42,8 @@ The extension opens an `ssh://username@ip-address` URL. macOS normally handles t
 ## SSH config support
 
 The extension also reads `~/.ssh/config` and lists concrete `Host` aliases in a separate `~/.ssh/config` section. Selecting one opens `ssh://alias`, so your existing OpenSSH settings such as `HostName`, `User`, `Port`, and identity files continue to be resolved by SSH.
+
+Use the source dropdown at the top of the list to switch between saved profiles and SSH config hosts. The selected source is remembered the next time you open the command.
 
 For example:
 
