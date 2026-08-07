@@ -12,7 +12,13 @@ import {
   confirmAlert,
   useNavigation,
 } from "@raycast/api";
-import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { useEffect, useState } from "react";
@@ -41,6 +47,7 @@ type SshConfigHost = {
   username?: string;
   port?: number;
   configPath: string;
+  isManaged?: boolean;
 };
 
 type SshConfigExportFormValues = {
@@ -50,6 +57,9 @@ type SshConfigExportFormValues = {
 const STORAGE_KEY = "ssh-profiles";
 const DEFAULT_PROFILE_COLOR = "#5E5CE6";
 const SSH_CONFIG_PATH = path.join(homedir(), ".ssh", "config");
+const SSH_CONFIG_LEGACY_MARKER = "# Added by Raycast SSH Profile Launcher";
+const SSH_CONFIG_BEGIN_MARKER_PREFIX = "# BEGIN Raycast SSH Profile Launcher:";
+const SSH_CONFIG_END_MARKER_PREFIX = "# END Raycast SSH Profile Launcher:";
 const PROFILE_COLORS = [
   { name: "Blue", value: "#5E5CE6" },
   { name: "Purple", value: "#AF52DE" },
@@ -187,6 +197,10 @@ async function parseSshConfigFile(
   const hosts: SshConfigHost[] = [];
   let currentAliases: string[] = [];
   let currentOptions: Record<string, string> = {};
+  let currentHostIsManaged = false;
+  let currentManagedAlias: string | undefined;
+  let pendingManagedAlias: string | undefined;
+  let pendingLegacyManagedHost = false;
 
   function flushHost() {
     if (currentAliases.length === 0) return;
@@ -205,11 +219,29 @@ async function parseSshConfigFile(
             ? port
             : undefined,
         configPath: resolvedConfigPath,
+        isManaged:
+          currentHostIsManaged &&
+          (!currentManagedAlias ||
+            currentManagedAlias.toLowerCase() === alias.toLowerCase()),
       });
     }
   }
 
   for (const rawLine of contents.split(/\r?\n/)) {
+    const trimmedRawLine = rawLine.trim();
+    if (trimmedRawLine.startsWith(SSH_CONFIG_BEGIN_MARKER_PREFIX)) {
+      pendingManagedAlias = trimmedRawLine
+        .slice(SSH_CONFIG_BEGIN_MARKER_PREFIX.length)
+        .trim();
+      pendingLegacyManagedHost = false;
+      continue;
+    }
+    if (trimmedRawLine === SSH_CONFIG_LEGACY_MARKER) {
+      pendingLegacyManagedHost = true;
+      pendingManagedAlias = undefined;
+      continue;
+    }
+
     const line = stripInlineComment(rawLine).trim();
     if (!line) continue;
 
@@ -239,6 +271,12 @@ async function parseSshConfigFile(
       flushHost();
       currentAliases = valueParts.filter(isConcreteSshAlias);
       currentOptions = {};
+      currentHostIsManaged = Boolean(
+        pendingManagedAlias || pendingLegacyManagedHost,
+      );
+      currentManagedAlias = pendingManagedAlias;
+      pendingManagedAlias = undefined;
+      pendingLegacyManagedHost = false;
       continue;
     }
 
@@ -288,11 +326,12 @@ function defaultSshAliasForProfile(profile: SshProfile): string {
 
 function buildSshConfigBlock(profile: SshProfile, alias: string): string {
   return [
-    "# Added by Raycast SSH Profile Launcher",
+    `${SSH_CONFIG_BEGIN_MARKER_PREFIX} ${alias}`,
     `Host ${alias}`,
     `  HostName ${profile.ipAddress}`,
     `  User ${profile.username}`,
     `  Port ${profile.port ?? 22}`,
+    `${SSH_CONFIG_END_MARKER_PREFIX} ${alias}`,
     "",
   ].join("\n");
 }
@@ -322,6 +361,85 @@ async function appendProfileToSshConfig(profile: SshProfile, alias: string) {
       mode: 0o600,
     },
   );
+}
+
+function lineStartsHostOrMatchBlock(line: string): boolean {
+  return /^(host|match)\s+/i.test(stripInlineComment(line).trim());
+}
+
+function hostLineIncludesAlias(line: string, alias: string): boolean {
+  const [keyword, ...aliases] = stripInlineComment(line).trim().split(/\s+/);
+  return (
+    keyword?.toLowerCase() === "host" &&
+    aliases.some(
+      (currentAlias) => currentAlias.toLowerCase() === alias.toLowerCase(),
+    )
+  );
+}
+
+function removeManagedSshConfigBlock(
+  contents: string,
+  alias: string,
+): string | undefined {
+  const lines = contents.split("\n");
+  const normalizedAlias = alias.toLowerCase();
+  const beginMarker =
+    `${SSH_CONFIG_BEGIN_MARKER_PREFIX} ${alias}`.toLowerCase();
+  const endMarker = `${SSH_CONFIG_END_MARKER_PREFIX} ${alias}`.toLowerCase();
+
+  const beginIndex = lines.findIndex(
+    (line) => line.trim().toLowerCase() === beginMarker,
+  );
+  if (beginIndex !== -1) {
+    const endIndex = lines.findIndex(
+      (line, index) =>
+        index > beginIndex && line.trim().toLowerCase() === endMarker,
+    );
+    if (endIndex === -1) return undefined;
+
+    const removalEndIndex =
+      lines[endIndex + 1] === "" ? endIndex + 1 : endIndex;
+    return lines
+      .filter((_, index) => index < beginIndex || index > removalEndIndex)
+      .join("\n");
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    if (lines[index].trim() !== SSH_CONFIG_LEGACY_MARKER) continue;
+
+    let hostIndex = index + 1;
+    while (hostIndex < lines.length && lines[hostIndex].trim() === "") {
+      hostIndex++;
+    }
+
+    if (!hostLineIncludesAlias(lines[hostIndex] ?? "", normalizedAlias))
+      continue;
+
+    let endIndex = hostIndex + 1;
+    while (
+      endIndex < lines.length &&
+      !lineStartsHostOrMatchBlock(lines[endIndex])
+    ) {
+      endIndex++;
+    }
+    if (lines[endIndex - 1] === "") endIndex--;
+
+    return lines
+      .filter((_, lineIndex) => lineIndex < index || lineIndex >= endIndex)
+      .join("\n");
+  }
+
+  return undefined;
+}
+
+async function removeSshConfigHost(host: SshConfigHost) {
+  const contents = await readFile(host.configPath, "utf8");
+  const updatedContents = removeManagedSshConfigBlock(contents, host.alias);
+  if (updatedContents === undefined) {
+    throw new Error("No managed SSH config block was found for this host.");
+  }
+
+  await writeFile(host.configPath, updatedContents, { mode: 0o600 });
 }
 
 function ProfileForm({
@@ -617,7 +735,13 @@ function SshConfigExportForm({
   );
 }
 
-function SshConfigHostDetails({ host }: { host: SshConfigHost }) {
+function SshConfigHostDetails({
+  host,
+  onDelete,
+}: {
+  host: SshConfigHost;
+  onDelete: (host: SshConfigHost) => void;
+}) {
   return (
     <Detail
       navigationTitle={host.alias}
@@ -637,6 +761,10 @@ function SshConfigHostDetails({ host }: { host: SshConfigHost }) {
             title="Port"
             text={host.port ? String(host.port) : "Default"}
           />
+          <Detail.Metadata.Label
+            title="Managed by Extension"
+            text={host.isManaged ? "Yes" : "No"}
+          />
           <Detail.Metadata.Separator />
           <Detail.Metadata.Label title="Config File" text={host.configPath} />
         </Detail.Metadata>
@@ -648,6 +776,14 @@ function SshConfigHostDetails({ host }: { host: SshConfigHost }) {
             icon={Icon.Terminal}
             target={sshUrlForConfigHost(host)}
           />
+          {host.isManaged ? (
+            <Action
+              title="Delete from SSH Config"
+              icon={Icon.Trash}
+              style={Action.Style.Destructive}
+              onAction={() => onDelete(host)}
+            />
+          ) : null}
         </ActionPanel>
       }
     />
@@ -741,6 +877,34 @@ export default function Command() {
       title: "SSH profile duplicated",
       message: duplicate.name,
     });
+  }
+
+  async function deleteSshConfigHost(host: SshConfigHost) {
+    const confirmed = await confirmAlert({
+      title: `Delete ${host.alias} from SSH config?`,
+      message: `This removes the managed Host block from ${host.configPath}.`,
+      primaryAction: {
+        title: "Delete Host",
+        style: Alert.ActionStyle.Destructive,
+      },
+    });
+    if (!confirmed) return;
+
+    try {
+      await removeSshConfigHost(host);
+      await refreshSshConfigHosts();
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Deleted from SSH Config",
+        message: host.alias,
+      });
+    } catch (error) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Could Not Delete SSH Config Host",
+        message: error instanceof Error ? error.message : host.alias,
+      });
+    }
   }
 
   const addProfileAction = (
@@ -885,8 +1049,21 @@ export default function Command() {
                   <Action.Push
                     title="View Host Details"
                     icon={Icon.Eye}
-                    target={<SshConfigHostDetails host={host} />}
+                    target={
+                      <SshConfigHostDetails
+                        host={host}
+                        onDelete={deleteSshConfigHost}
+                      />
+                    }
                   />
+                  {host.isManaged ? (
+                    <Action
+                      title="Delete from SSH Config"
+                      icon={Icon.Trash}
+                      style={Action.Style.Destructive}
+                      onAction={() => deleteSshConfigHost(host)}
+                    />
+                  ) : null}
                   {addProfileAction}
                 </ActionPanel>
               }

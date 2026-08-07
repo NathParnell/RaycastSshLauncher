@@ -12,6 +12,7 @@ A Raycast extension for saving SSH connection profiles and quickly opening them 
 - Search saved profiles from Raycast
 - Automatically list concrete `Host` aliases from `~/.ssh/config`
 - Save Raycast profiles to `~/.ssh/config` as OpenSSH `Host` entries
+- Delete SSH config entries created by this extension
 - Mark profiles as favourites and keep them at the top of the list
 - Press <kbd>Enter</kbd> to connect to the selected profile
 - Edit existing profiles
@@ -53,6 +54,8 @@ Host staging
 The `staging` alias will appear in Raycast without creating a saved profile. `Include` files and simple include globs are supported. Wildcard or negated host patterns such as `Host *.example.com` and `Host !bastion *` are skipped because they are not concrete launch targets.
 
 Saved Raycast profiles can also be exported to SSH config from the profile action panel with **Save to SSH Config**. The extension asks for the `Host` alias, checks for an existing alias, and appends a marked block to `~/.ssh/config` without overwriting existing entries.
+
+SSH config entries created by this extension can be removed with **Delete from SSH Config**. Manually written SSH config entries are read-only in the extension and are not deleted or rewritten.
 
 ## Development setup
 
