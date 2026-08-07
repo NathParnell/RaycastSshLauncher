@@ -12,7 +12,7 @@ import {
   confirmAlert,
   useNavigation,
 } from "@raycast/api";
-import { readdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { useEffect, useState } from "react";
@@ -41,6 +41,10 @@ type SshConfigHost = {
   username?: string;
   port?: number;
   configPath: string;
+};
+
+type SshConfigExportFormValues = {
+  alias: string;
 };
 
 const STORAGE_KEY = "ssh-profiles";
@@ -272,6 +276,54 @@ function sshUrlForConfigHost(host: SshConfigHost): string {
   return `ssh://${host.alias}`;
 }
 
+function defaultSshAliasForProfile(profile: SshProfile): string {
+  const alias = profile.name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return alias || profile.ipAddress.split(".")[0] || "ssh-host";
+}
+
+function buildSshConfigBlock(profile: SshProfile, alias: string): string {
+  return [
+    "# Added by Raycast SSH Profile Launcher",
+    `Host ${alias}`,
+    `  HostName ${profile.ipAddress}`,
+    `  User ${profile.username}`,
+    `  Port ${profile.port ?? 22}`,
+    "",
+  ].join("\n");
+}
+
+async function appendProfileToSshConfig(profile: SshProfile, alias: string) {
+  await mkdir(path.dirname(SSH_CONFIG_PATH), { recursive: true, mode: 0o700 });
+
+  let existingContents = "";
+  try {
+    existingContents = await readFile(SSH_CONFIG_PATH, "utf8");
+  } catch {
+    // Missing config files are created on export.
+  }
+
+  const prefix =
+    existingContents.length === 0
+      ? ""
+      : existingContents.endsWith("\n\n")
+        ? ""
+        : existingContents.endsWith("\n")
+          ? "\n"
+          : "\n\n";
+  await appendFile(
+    SSH_CONFIG_PATH,
+    `${prefix}${buildSshConfigBlock(profile, alias)}`,
+    {
+      mode: 0o600,
+    },
+  );
+}
+
 function ProfileForm({
   profile,
   onSave,
@@ -414,9 +466,13 @@ function ProfileForm({
 function ProfileDetails({
   profile,
   onUpdate,
+  existingSshConfigAliases,
+  onExport,
 }: {
   profile: SshProfile;
   onUpdate: (profile: SshProfile) => void;
+  existingSshConfigAliases: Set<string>;
+  onExport: () => void;
 }) {
   const notes = profile.notes
     ? escapeMarkdown(profile.notes)
@@ -472,9 +528,92 @@ function ProfileDetails({
             icon={Icon.Pencil}
             target={<ProfileForm profile={profile} onSave={onUpdate} />}
           />
+          <Action.Push
+            title="Save to SSH Config"
+            icon={Icon.Document}
+            target={
+              <SshConfigExportForm
+                profile={profile}
+                existingAliases={existingSshConfigAliases}
+                onExport={onExport}
+              />
+            }
+          />
         </ActionPanel>
       }
     />
+  );
+}
+
+function SshConfigExportForm({
+  profile,
+  existingAliases,
+  onExport,
+}: {
+  profile: SshProfile;
+  existingAliases: Set<string>;
+  onExport: () => void;
+}) {
+  const { pop } = useNavigation();
+  const [aliasError, setAliasError] = useState<string>();
+
+  async function handleSubmit(values: SshConfigExportFormValues) {
+    const alias = values.alias.trim();
+    const normalizedAlias = alias.toLowerCase();
+
+    if (!isConcreteSshAlias(alias)) {
+      setAliasError("Use letters, numbers, dots, underscores, or hyphens");
+      return;
+    }
+
+    const currentAliases = new Set([
+      ...existingAliases,
+      ...(await readSshConfigHosts()).map((host) => host.alias.toLowerCase()),
+    ]);
+
+    if (currentAliases.has(normalizedAlias)) {
+      setAliasError("This SSH config host already exists");
+      return;
+    }
+
+    await appendProfileToSshConfig(profile, alias);
+    onExport();
+    await showToast({
+      style: Toast.Style.Success,
+      title: "Saved to SSH Config",
+      message: alias,
+    });
+    pop();
+  }
+
+  return (
+    <Form
+      navigationTitle="Save to SSH Config"
+      actions={
+        <ActionPanel>
+          <Action.SubmitForm
+            title="Save to SSH Config"
+            icon={Icon.Checkmark}
+            onSubmit={handleSubmit}
+          />
+        </ActionPanel>
+      }
+    >
+      <Form.TextField
+        id="alias"
+        title="Host Alias"
+        placeholder="staging"
+        defaultValue={defaultSshAliasForProfile(profile)}
+        error={aliasError}
+        onChange={() => setAliasError(undefined)}
+      />
+      <Form.Description
+        text={`This appends a Host block to ${SSH_CONFIG_PATH}. Existing SSH config hosts are not overwritten.`}
+      />
+      <Form.Description
+        text={`HostName ${profile.ipAddress}\nUser ${profile.username}\nPort ${profile.port ?? 22}`}
+      />
+    </Form>
   );
 }
 
@@ -528,6 +667,10 @@ export default function Command() {
       })
       .finally(() => setIsLoading(false));
   }, []);
+
+  async function refreshSshConfigHosts() {
+    setSshConfigHosts(await readSshConfigHosts());
+  }
 
   function addProfile(profile: SshProfile) {
     setProfiles((currentProfiles) => [...currentProfiles, profile]);
@@ -608,6 +751,26 @@ export default function Command() {
     />
   );
 
+  const existingSshConfigAliases = new Set(
+    sshConfigHosts.map((host) => host.alias.toLowerCase()),
+  );
+
+  function exportProfileAction(profile: SshProfile) {
+    return (
+      <Action.Push
+        title="Save to SSH Config"
+        icon={Icon.Document}
+        target={
+          <SshConfigExportForm
+            profile={profile}
+            existingAliases={existingSshConfigAliases}
+            onExport={refreshSshConfigHosts}
+          />
+        }
+      />
+    );
+  }
+
   return (
     <List isLoading={isLoading} searchBarPlaceholder="Search SSH profiles...">
       {profiles.length === 0 && sshConfigHosts.length === 0 && !isLoading ? (
@@ -654,6 +817,8 @@ export default function Command() {
                         <ProfileDetails
                           profile={profile}
                           onUpdate={updateProfile}
+                          existingSshConfigAliases={existingSshConfigAliases}
+                          onExport={refreshSshConfigHosts}
                         />
                       }
                     />
@@ -678,6 +843,7 @@ export default function Command() {
                       icon={Icon.Duplicate}
                       onAction={() => duplicateProfile(profile)}
                     />
+                    {exportProfileAction(profile)}
                     {addProfileAction}
                     <Action
                       title="Delete SSH Profile"
